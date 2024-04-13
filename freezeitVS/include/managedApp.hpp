@@ -57,14 +57,11 @@ private:
             "com.giftedcat.adskiphelper",           // 跳广告
             "com.merxury.blocker",                  // Blocker
             "com.wpengapp.lightstart",              // 轻启动
+            "li.songe.gkd",                         // GKD
+            "com.sevtinge.hyperceiler",             // HyperCeiler
 
             "com.topjohnwu.magisk",                 // Magisk
-            "io.github.vvb2060.magisk",             // Magisk Alpha
-            "io.github.huskydg.magisk",             // Magisk Delta
-            "io.github.jark006.freezeit",           // 冻它
-            "io.github.jark006.weather",            // 小天气
             "org.lsposed.manager",                  // LSPosed
-            "com.github.tianma8023.xposed.smscode", // XposedSmsCode
             "name.monwf.customiuizer",              // 米客 原版
             "name.mikanoshi.customiuizer",          // 米客
             "com.android.vending",                  // Play 商店
@@ -726,6 +723,18 @@ public:
         return false;
     }
 
+    bool isTrustedApp(const char* ptr) {
+        const char* prefix[] = {
+                "com.github.",
+                "io.github.",
+        };
+        for (size_t i = 0; i < sizeof(prefix) / sizeof(prefix[0]); i++) {
+            if (Utils::startWith(prefix[i], ptr))
+                return true;
+        }
+        return false;
+    }
+
     void applyCfgTemp() {
         for (auto& appInfo : appInfoMap) {
             if (appInfo.uid < UID_START)continue;
@@ -745,7 +754,7 @@ public:
         for (auto& appInfo : appInfoMap) {
             if (appInfo.uid < UID_START)continue;
 
-            if (whiteListForce.contains(appInfo.package))
+            if (isTrustedApp(appInfo.package.c_str()) || whiteListForce.contains(appInfo.package))
                 appInfo.freezeMode = FREEZE_MODE::WHITEFORCE;
         }
 

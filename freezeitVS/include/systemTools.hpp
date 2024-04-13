@@ -311,6 +311,10 @@ public:
         else {
             current /= 1000; // uA -> mA
         }
+
+        if (settings.enableDoubleCell)//双电芯
+            current *= 2;
+
         return (voltage * current) / (freezeit.isSamsung ? 1000 : -1000);
     }
 

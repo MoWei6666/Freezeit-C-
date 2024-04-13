@@ -343,19 +343,29 @@ public:
             if (tips.length())
                 freezeit.logFmt("以下UID的应用不受冻它管理：[%s] 可在冻它配置页搜索UID查看是哪些应用", tips.c_str());
 
-            // auto runningUids = freezer.getRunningUids(changeUidSet);
-            auto runningPids = freezer.getRunningPids(changeUidSet);
-            tips.clear();
-            for (auto& [uid, pids] : runningPids) {
-                auto& appInfo = managedApp[uid];
-                tips += "\n" + appInfo.label;
-                for (const int pid : pids)
-                    tips += " " + to_string(pid);
-                appInfo.pids = std::move(pids);
-                freezer.handleSignal(appInfo, SIGKILL); // 已包含 V1 前置解冻
+            //auto runningPids = freezer.getRunningPids(changeUidSet);
+            //tips.clear();
+            //for (auto& [uid, pids] : runningPids) {
+            //    auto& appInfo = managedApp[uid];
+            //    tips += "\n" + appInfo.label;
+            //    for (const int pid : pids)
+            //        tips += " " + to_string(pid);
+            //    appInfo.pids = std::move(pids);
+            //    freezer.handleSignal(appInfo, SIGKILL); // 已包含 V1 前置解冻
+            //}
+            //if (tips.length())
+            //    freezeit.logFmt("杀死策略变更的应用: \n%s\n", tips.c_str());
+
+            auto runningUids = freezer.getRunningUids(changeUidSet);
+            if (runningUids.size()) {
+                freezer.unFreezerTemporary(runningUids);
+                tips.clear();
+                for (auto& uid : runningUids) {
+                    tips.append(managedApp[uid].label);
+                    tips.append(" ");
+                }
+                freezeit.logFmt("解冻策略变更的应用: %s", tips.c_str());
             }
-            if (tips.length())
-                freezeit.logFmt("杀死策略变更的应用: \n%s\n", tips.c_str());
 
             managedApp.loadConfig2CfgTemp(newCfg);
             managedApp.updateIME2CfgTemp();

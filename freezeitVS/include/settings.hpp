@@ -15,10 +15,10 @@ private:
             8,  //[0] 设置文件版本
             0,  //[1] 
             10, //[2] freezeTimeout sec
-            4,  //[3] wakeupTimeoutIdx 固定选项
+            4,  //[3] wakeupTimeoutIdx  定时唤醒 参数索引 0-5：关闭, 5m, 15m, 30m, 1h, 2h
             20, //[4] terminateTimeout sec
-            2,  //[5] setMode 设置Freezer模式  0: v2frozen, 1: v2uid, 2: 全局SIGSTOP(默认)
-            2,  //[6] refreezeTimeoutIdx 固定选项
+            0,  //[5] setMode 设置Freezer模式  0: v2frozen(默认), 1: v2uid, 2: 全局SIGSTOP
+            2,  //[6] refreezeTimeoutIdx 定时压制 参数索引 0-3：关闭, 30m, 1h, 2h
             0,  //[7]
             0,  //[8]
             0,  //[9]
@@ -27,7 +27,7 @@ private:
             0,  //[12]
             1,  //[13] 电池监控
             0,  //[14] 电流校准
-            0,  //[15] 
+            0,  //[15] 双电芯
             1,  //[16] 调整 lmk 参数 仅安卓12-15
             1,  //[17] 深度Doze
             0,  //[18] 
@@ -63,14 +63,14 @@ public:
     uint8_t& settingsVer = settingsVar[0];          // 设置文件版本
     //uint8_t& unknown = settingsVar[1];          // 
     uint8_t& freezeTimeout = settingsVar[2];        // 超时冻结 单位 秒
-    uint8_t& wakeupTimeoutIdx = settingsVar[3];     // 定时唤醒 参数索引 0-4
+    uint8_t& wakeupTimeoutIdx = settingsVar[3];     // 定时唤醒 参数索引 0-5：关闭, 5m, 15m, 30m, 1h, 2h
     uint8_t& terminateTimeout = settingsVar[4];     // 超时杀死 单位 秒
     uint8_t& setMode = settingsVar[5];              // Freezer模式
-    uint8_t& refreezeTimeoutIdx = settingsVar[6];   // 定时压制 参数索引 0-4
+    uint8_t& refreezeTimeoutIdx = settingsVar[6];   // 定时压制 参数索引 0-3：关闭, 30m, 1h, 2h
 
     uint8_t& enableBatteryMonitor = settingsVar[13];   // 电池监控
     uint8_t& enableCurrentFix = settingsVar[14];       // 电池电流校准
-    //uint8_t& unknown = settingsVar[15];                // 
+    uint8_t& enableDoubleCell = settingsVar[15];       // 双电芯 电流翻倍
     uint8_t& enableLMK = settingsVar[16];              // 调整 lmk 参数 仅安卓11-15
     uint8_t& enableDoze = settingsVar[17];             // 深度Doze
     //uint8_t& unknown = settingsVar[18];                // 
@@ -159,17 +159,17 @@ public:
     }
 
     bool isRefreezeEnable() const {
-        return refreezeTimeoutIdx > 0 && refreezeTimeoutIdx < (sizeof(refreezeTimeoutList) / sizeof(refreezeTimeoutList[0]));
+        return 0 < refreezeTimeoutIdx && refreezeTimeoutIdx <= refreezeTimeoutIdxMax;
     }
     int getRefreezeTimeout() const {
-        return refreezeTimeoutList[refreezeTimeoutIdx < (sizeof(refreezeTimeoutList) / sizeof(refreezeTimeoutList[0])) ? refreezeTimeoutIdx : 0];
+        return refreezeTimeoutList[refreezeTimeoutIdx <= refreezeTimeoutIdxMax ? refreezeTimeoutIdx : 0];
     }
 
     bool isWakeupEnable() const {
-        return wakeupTimeoutIdx > 0 && wakeupTimeoutIdx < (sizeof(wakeupTimeoutList) / sizeof(wakeupTimeoutList[0]));
+        return 0 < wakeupTimeoutIdx && wakeupTimeoutIdx <= wakeupTimeoutIdxMax;
     }
     int getWakeupTimeout() const {
-        return wakeupTimeoutList[wakeupTimeoutIdx < (sizeof(wakeupTimeoutList) / sizeof(wakeupTimeoutList[0])) ? wakeupTimeoutIdx : 0];
+        return wakeupTimeoutList[wakeupTimeoutIdx <= wakeupTimeoutIdxMax ? wakeupTimeoutIdx : 0];
     }
 
     bool save() {
@@ -225,7 +225,7 @@ public:
         case 12: // xxx
         case 13: // 电池监控
         case 14: // 电流校准
-        case 15: // xxx
+        case 15: // 双电芯
         case 16: // lmk
         case 17: // doze
         case 18: // xxx

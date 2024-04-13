@@ -6,6 +6,21 @@
 #include "doze.hpp"
 #include "freezeit.hpp"
 #include "systemTools.hpp"
+#include <linux/netlink.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
+#define PACKET_SIZE      128
+#define NETLINK_TEST     26
+#define USER_PORT        100
+#define MAX_PLOAD        125
+#define MSG_LEN          125
+
+typedef struct _user_msg_info
+{
+    struct nlmsghdr hdr;
+    char  msg[MSG_LEN];
+} user_msg_info;
 
 class Freezer {
 private:
@@ -77,6 +92,7 @@ public:
         binderInit("/dev/binder");
 
         threads.emplace_back(thread(&Freezer::cpuSetTriggerTask, this)); //监控前台
+        threads.emplace_back(thread(&Freezer::binderEventTriggerTask, this)); //binder事件
         threads.emplace_back(thread(&Freezer::cycleThreadFunc, this));
 
         checkAndMountV2();
@@ -173,6 +189,17 @@ public:
         }
         closedir(dir);
         END_TIME_COUNT;
+    }
+
+    //临时解冻
+    void unFreezerTemporary(set<int>& uids) {
+        curForegroundApp.insert(uids.begin(), uids.end());
+        updateAppProcess();
+    }
+
+    void unFreezerTemporary(int uid) {
+        curForegroundApp.insert(uid);
+        updateAppProcess();
     }
 
     map<int, vector<int>> getRunningPids(set<int>& uidSet) {
@@ -326,10 +353,16 @@ public:
             getPids(appInfo);
         }
         else {
-            erase_if(appInfo.pids, [](const int pid) {
-                char path[16];
+            erase_if(appInfo.pids, [&appInfo](const int pid) {
+                char path[32] = {};
+                
+                //snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+                //return !Utils::readString(path).starts_with(appInfo.package);
+
                 snprintf(path, sizeof(path), "/proc/%d", pid);
-                return access(path, F_OK);
+                struct stat statBuf {};
+                if (stat(path, &statBuf)) return true;
+                return (uid_t)appInfo.uid != statBuf.st_uid;
                 });
         }
 
@@ -405,7 +438,7 @@ public:
 
 
     // 重新压制第三方。 白名单, 前台, 待冻结列队 都跳过
-    void checkReFreeze() {
+    void checkReFreezeBackup() {
         START_TIME_COUNT;
 
         if (!settings.isRefreezeEnable()) return;
@@ -478,6 +511,81 @@ public:
         }
         else {
             freezeit.log("定时压制 目前均处于冻结状态");
+        }
+
+        END_TIME_COUNT;
+    }
+
+
+    // 临时解冻：检查已冻结应用的进程状态wchan，若有未冻结进程则临时解冻
+    void checkUnFreeze() {
+        START_TIME_COUNT;
+
+        if (--refreezeSecRemain > 0) return;
+        refreezeSecRemain = 3600;// 固定每小时检查一次
+
+        lock_guard<mutex> lock(naughtyMutex);
+
+        if (naughtyApp.size() == 0) {
+            DIR* dir = opendir("/proc");
+            if (dir == nullptr) {
+                char errTips[256];
+                snprintf(errTips, sizeof(errTips), "错误: %s() [%d]:[%s]", __FUNCTION__, errno,
+                    strerror(errno));
+                fprintf(stderr, "%s", errTips);
+                freezeit.log(errTips);
+                return;
+            }
+
+            struct dirent* file;
+            while ((file = readdir(dir)) != nullptr) {
+                if (file->d_type != DT_DIR) continue;
+                if (file->d_name[0] < '0' || file->d_name[0] > '9') continue;
+
+                const int pid = atoi(file->d_name);
+                if (pid <= 100) continue;
+
+                char fullPath[64];
+                memcpy(fullPath, "/proc/", 6);
+                memcpy(fullPath + 6, file->d_name, 6);
+
+                struct stat statBuf;
+                if (stat(fullPath, &statBuf))continue;
+                const int uid = statBuf.st_uid;
+                if (!managedApp.contains(uid) || pendingHandleList.contains(uid) || curForegroundApp.contains(uid))
+                    continue;
+
+                auto& appInfo = managedApp[uid];
+                if (appInfo.isWhitelist())
+                    continue;
+
+                strcat(fullPath + 8, "/cmdline");
+                char readBuff[256];
+                if (Utils::readString(fullPath, readBuff, sizeof(readBuff)) == 0)continue;
+                const auto& package = appInfo.package;
+                if (strncmp(readBuff, package.c_str(), package.length())) continue;
+                const char endChar = readBuff[package.length()]; // 特例 com.android.chrome_zygote 无法binder冻结
+                if (endChar != ':' && endChar != 0)continue;
+
+                memcpy(fullPath + 6, file->d_name, 6);
+                strcat(fullPath + 8, "/wchan");
+                if (Utils::readString(fullPath, readBuff, sizeof(readBuff)) == 0)continue;
+                if (strcmp(readBuff, v2wchan) && strcmp(readBuff, v1wchan) && strcmp(readBuff, SIGSTOPwchan) &&
+                    strcmp(readBuff, v2xwchan) && strcmp(readBuff, pStopwchan)) {
+                    naughtyApp.insert(uid);
+                }
+            }
+            closedir(dir);
+        }
+
+        if (naughtyApp.size()) {
+            stackString<1024> tmp("临时解冻");
+            for (const auto uid : naughtyApp) {
+                tmp.append(' ').append(managedApp[uid].label.c_str());
+            }
+            freezeit.log(string_view(tmp.c_str(), tmp.length));
+            unFreezerTemporary(naughtyApp);
+            naughtyApp.clear();
         }
 
         END_TIME_COUNT;
@@ -671,12 +779,12 @@ public:
         closedir(dir);
 
         if (uidSet.size() == 0) {
-            freezeit.log("设为冻结的应用没有运行");
+            freezeit.log("后台很干净，一个黑名单应用都没有");
         }
         else {
 
             if (naughtyApp.size()) {
-                stateStr.append("\n ⚠️ 发现 [未冻结] 的进程, 即将进行冻结 ⚠️\n", 65);
+                stateStr.append("\n 😁 发现 [未冻结状态] 的进程, 即将临时解冻\n", 65);
                 refreezeSecRemain = 0;
             }
 
@@ -690,7 +798,7 @@ public:
         END_TIME_COUNT;
     }
 
-    // 解冻新APP, 旧APP加入待冻结列队 call once per 0.5 sec when Touching
+    // 解冻新APP, 旧APP加入待冻结列队
     void updateAppProcess() {
         bool isupdate = false;
         vector<int> newShowOnApp, toBackgroundApp;
@@ -721,11 +829,12 @@ public:
 
             const int num = handleProcess(appInfo, false);
             if (num > 0) freezeit.logFmt("☀️解冻 %s %d进程", appInfo.label.c_str(), num);
-            else freezeit.logFmt("😁打开 %s", appInfo.label.c_str());
+            else freezeit.logFmt("😁启动 %s", appInfo.label.c_str());
         }
 
         for (const int uid : toBackgroundApp) { // 更新倒计时
             isupdate = true;
+            managedApp[uid].delayCnt = 0;
             pendingHandleList[uid] = managedApp[uid].isTerminateMode() ?
                 settings.terminateTimeout : settings.freezeTimeout;
         }
@@ -748,11 +857,12 @@ public:
 
             const int uid = it->first;
             auto& appInfo = managedApp[uid];
-            const int num = handleProcess(appInfo, true);
+            int num = handleProcess(appInfo, true);
             if (num < 0) {
-                if (appInfo.delayCnt >= 8) { // TODO
+                if (appInfo.delayCnt >= 6) {
                     handleSignal(appInfo, SIGKILL);
                     freezeit.logFmt("%s:%d 已延迟%d次, 强制杀死", appInfo.label.c_str(), -num, appInfo.delayCnt);
+                    num = 0;
                 }
                 else {
                     appInfo.delayCnt++;
@@ -791,7 +901,7 @@ public:
                 freezeit.logFmt("%s冻结 %s %d进程 %s",
                     appInfo.isSignalMode() ? "🧊" : "❄️",
                     appInfo.label.c_str(), num, timeStr.c_str());
-            else freezeit.logFmt("😭关闭 %s %s", appInfo.label.c_str(), *timeStr);
+            else freezeit.logFmt("😭关闭 %s %s", appInfo.label.c_str(), timeStr.c_str());
 
             isupdate = true;
         }
@@ -1043,6 +1153,92 @@ public:
         freezeit.log("已退出监控同步事件: 0xB0");
     }
 
+    //TODO
+    void binderEventTriggerTask() {
+        int skfd;
+        int ret;
+        user_msg_info u_info{};
+        socklen_t len;
+        struct sockaddr_nl saddr{}, daddr{};
+        auto umsg = "Hello! Re:Kernel!";
+
+        struct nlmsghdr* nlh = (struct nlmsghdr*)malloc(NLMSG_SPACE(MAX_PLOAD));
+
+        while (true){
+            skfd = socket(AF_NETLINK, SOCK_RAW, NETLINK_TEST);
+            if (skfd == -1){
+                //perror("Create connection error\n");
+                freezeit.log("BinderEvent AF_NETLINK 创建失败");
+                fprintf(stderr, "BinderEvent AF_NETLINK 创建失败");
+                sleep(60);
+                continue;
+            }
+
+            memset(&saddr, 0, sizeof(saddr));
+            saddr.nl_family = AF_NETLINK;
+            saddr.nl_pid = USER_PORT;
+            saddr.nl_groups = 0;
+            if (bind(skfd, (struct sockaddr*)&saddr, sizeof(saddr)) != 0){
+                //perror("Failed bind to connection\n");
+                close(skfd);
+
+                freezeit.log("BinderEvent bind 失败");
+                fprintf(stderr, "BinderEvent bind 失败");
+                sleep(60);
+                continue;
+            }
+
+            memset(&daddr, 0, sizeof(daddr));
+            daddr.nl_family = AF_NETLINK;
+            daddr.nl_pid = 0;
+            daddr.nl_groups = 0;
+
+            memset(nlh, 0, sizeof(struct nlmsghdr));
+            nlh->nlmsg_len = NLMSG_SPACE(MAX_PLOAD);
+            nlh->nlmsg_flags = 0;
+            nlh->nlmsg_type = 0;
+            nlh->nlmsg_seq = 0;
+            nlh->nlmsg_pid = saddr.nl_pid;
+
+            memcpy(NLMSG_DATA(nlh), umsg, strlen(umsg));
+            freezeit.logFmt("Send msg to kernel:%s", umsg);
+
+            ret = sendto(skfd, nlh, nlh->nlmsg_len, 0, (struct sockaddr*)&daddr, sizeof(struct sockaddr_nl));
+            if (!ret) {
+                //perror("Failed send msg to kernel!\n");
+                close(skfd);
+
+                freezeit.log("Failed send msg to kernel");
+                fprintf(stderr, "Failed send msg to kernel");
+                sleep(60);
+                continue;
+            }
+
+            while (true) {
+                memset(&u_info, 0, sizeof(u_info));
+                len = sizeof(struct sockaddr_nl);
+                ret = recvfrom(skfd, &u_info, sizeof(user_msg_info), 0, (struct sockaddr*)&daddr, &len);
+                if (!ret) {
+                    //perror("Failed recv msg from kernel!\n");
+                    //close(skfd);
+
+                    freezeit.log("Failed recv msg from kernel!");
+                    fprintf(stderr, "Failed recv msg from kernel!");
+                    break;
+                }
+
+                //printf("Message from kernel:%s\n", u_info.msg);
+                freezeit.logFmt("Message from kernel:[%s]", u_info.msg);
+                fprintf(stderr, "Message from kernel:[%s]", u_info.msg);
+            }
+
+            close(skfd);
+        }
+
+        free(nlh);
+    }
+
+
     void cycleThreadFunc() {
         uint32_t halfSecondCnt{ 0 };
 
@@ -1085,7 +1281,7 @@ public:
             if (doze.isScreenOffStandby)continue;// 息屏状态 不用执行 以下功能
 
             systemTools.checkBattery();// 1分钟一次 电池检测
-            checkReFreeze();// 重新压制切后台的应用
+            checkUnFreeze();// 检查进程状态，按需临时解冻
             checkWakeup();// 检查是否有定时解冻
         }
     }
@@ -1185,7 +1381,7 @@ public:
 
         // https://cs.android.com/android/kernel/superproject/+/common-android-mainline:common/drivers/android/binder.c;l=5434
         // 100ms 等待传输事务完成
-        binder_freeze_info binderInfo{ 0u, freeze ? 1u : 0u, 100u };
+        binder_freeze_info binderInfo{ .pid = 0u, .enable = freeze ? 1u : 0u, .timeout_ms = 0u };
         binder_frozen_status_info statusInfo = { 0, 0, 0 };
 
         if (freeze) { // 冻结
@@ -1196,8 +1392,15 @@ public:
 
                     // ret == EAGAIN indicates that transactions have not drained.
                     // Call again to poll for completion.
-                    if (errorCode != EAGAIN)
+                    switch (errorCode) {
+                    case EAGAIN: // 11
+                        break;
+                    case EINVAL:  // 22  酷安经常有某进程无法冻结binder
+                        break;
+                    default:
                         freezeit.logFmt("冻结 Binder 发生异常 [%s:%u] ErrorCode:%d", appInfo.label.c_str(), binderInfo.pid, errorCode);
+                        break;
+                    }
 
                     // 解冻已经被冻结binder的进程
                     binderInfo.enable = 0;
@@ -1288,7 +1491,9 @@ public:
                     freezeit.logFmt("解冻 Binder 发生异常 [%s:%u] ErrorCode:%d", appInfo.label.c_str(), binderInfo.pid, errorCode);
 
                     char tmp[32];
-                    snprintf(tmp, sizeof(tmp), "/proc/%d", binderInfo.pid);
+                    snprintf(tmp, sizeof(tmp), "/proc/%d/cmdline", binderInfo.pid);
+                        
+                    freezeit.logFmt("cmdline:[%s]", Utils::readString(tmp).c_str());
 
                     if (access(tmp, F_OK)) {
                         freezeit.logFmt("进程已不在 [%s:%u] ", appInfo.label.c_str(), binderInfo.pid);

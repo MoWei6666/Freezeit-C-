@@ -26,7 +26,7 @@ echo "[$(date "+%Y-%m-%d %H:%M:%S")] 开始运行服务脚本" >"$bootLogPath"
 
 wait_until_login
 
-echo "[$(date "+%Y-%m-%d %H:%M:%S")] 进入桌面, 30秒后将启动冻它" >>"$bootLogPath"
+echo "[$(date "+%Y-%m-%d %H:%M:%S")] 进入桌面, 10秒后将启动冻它" >>"$bootLogPath"
 
 sleep 10
 
