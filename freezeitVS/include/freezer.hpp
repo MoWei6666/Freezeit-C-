@@ -11,7 +11,8 @@
 #include <sys/socket.h>
 
 #define PACKET_SIZE      128
-#define NETLINK_TEST     26
+//#define NETLINK_TEST     26
+#define NETLINK_TEST     22  // 需要读取 /proc/rekernel/
 #define USER_PORT        100
 #define MAX_PLOAD        125
 #define MSG_LEN          125
@@ -42,7 +43,9 @@ private:
 
     uint32_t timelineIdx = 0;
     uint32_t unfrozenTimeline[4096] = {};
-    map<int, uint32_t> unfrozenIdx;
+
+    bool isReKernelConnected = false;
+    int binderEventCnt = 0;
 
     int refreezeSecRemain = 60; //开机 一分钟时 就压一次
     int remainTimesToRefreshTopApp = 2; //允许多线程冲突，不需要原子操作
@@ -402,18 +405,19 @@ public:
 
         if (settings.isWakeupEnable()) {
             // 无论冻结还是解冻都要清除 解冻时间线上已设置的uid
-            auto it = unfrozenIdx.find(appInfo.uid);
-            if (it != unfrozenIdx.end())
-                unfrozenTimeline[it->second] = 0;
+            if(0 <= appInfo.timelineUnfrozenIdx && appInfo.timelineUnfrozenIdx < 4096)
+                unfrozenTimeline[appInfo.timelineUnfrozenIdx] = 0;
 
             // 冻结就需要在 解冻时间线 插入下一次解冻的时间
             if (freeze && appInfo.pids.size() && appInfo.isSignalOrFreezer()) {
-                uint32_t nextIdx = (timelineIdx + settings.getWakeupTimeout()) & 0x0FFF; // [ %4096]
-                unfrozenIdx[appInfo.uid] = nextIdx;
+                int nextIdx = (timelineIdx + settings.getWakeupTimeout()) & 0x0FFF; // [ %4096]
+                while (unfrozenTimeline[nextIdx])
+                    nextIdx = (nextIdx + 1) & 0x0FFF;
+                appInfo.timelineUnfrozenIdx = nextIdx;
                 unfrozenTimeline[nextIdx] = appInfo.uid;
             }
             else {
-                unfrozenIdx.erase(appInfo.uid);
+                appInfo.timelineUnfrozenIdx = -1;
             }
         }
 
@@ -667,7 +671,7 @@ public:
             return;
         }
 
-        int getSignalCnt = 0;
+        //int getSignalCnt = 0;
         int totalMiB = 0;
         set<int> uidSet, pidSet;
 
@@ -754,7 +758,7 @@ public:
             }
             else if (!strcmp(readBuff, v2xwchan)) {
                 stateStr.appendFmt("❄️V2*冻结中 %s\n", label.c_str());
-                getSignalCnt++;
+                //getSignalCnt++;
             }
             else if (!strcmp(readBuff, pStopwchan)) {
                 stateStr.appendFmt("🧊ST冻结中(ptrace_stop) %s\n", label.c_str());
@@ -784,17 +788,34 @@ public:
         else {
 
             if (naughtyApp.size()) {
-                stateStr.append("\n 😁 发现 [未冻结状态] 的进程, 即将临时解冻\n", 65);
+                stateStr.append("\n 发现 [未冻结状态] 的进程, 即将临时解冻\n");
                 refreezeSecRemain = 0;
             }
 
             stateStr.appendFmt("\n总计 %d 应用 %d 进程, 占用内存 ", (int)uidSet.size(), (int)pidSet.size());
             stateStr.appendFmt("%.2f GiB", totalMiB / 1024.0);
-            if (getSignalCnt)
-                stateStr.append(", V2*带星号状态为get_signal，小概率非冻结状态");
+            //if (getSignalCnt)
+            //    stateStr.append(", V2*带星号状态为get_signal，小概率非冻结状态");
 
             freezeit.log(string_view(stateStr.c_str(), stateStr.length));
         }
+
+        if(isReKernelConnected)
+            freezeit.logFmt("Re:Kernel上报次数 %d", binderEventCnt);
+
+        stackString<64> tips;
+        int tmp = systemTools.runningTime;
+        if (tmp >= 3600) {
+            tips.append(tmp / 3600).append("时");
+            tmp %= 3600;
+        }
+        if (tmp >= 60) {
+            tips.append(tmp / 60).append("分");
+            tmp %= 60;
+        }
+        tips.append(tmp).append("秒");
+        freezeit.logFmt("满电至今已运行 %s", tips.c_str());
+
         END_TIME_COUNT;
     }
 
@@ -857,9 +878,15 @@ public:
 
             const int uid = it->first;
             auto& appInfo = managedApp[uid];
+
+            if (appInfo.isWhitelist()) { // 刚切换成白名单的
+                it = pendingHandleList.erase(it);
+                continue;
+            }
+
             int num = handleProcess(appInfo, true);
             if (num < 0) {
-                if (appInfo.delayCnt >= 6) {
+                if (appInfo.delayCnt >= 5) {
                     handleSignal(appInfo, SIGKILL);
                     freezeit.logFmt("%s:%d 已延迟%d次, 强制杀死", appInfo.label.c_str(), -num, appInfo.delayCnt);
                     num = 0;
@@ -968,7 +995,7 @@ public:
             }
         }
         else {
-            unfrozenIdx.erase(uid);
+            appInfo.timelineUnfrozenIdx = -1;
         }
     }
 
@@ -1153,23 +1180,34 @@ public:
         freezeit.log("已退出监控同步事件: 0xB0");
     }
 
-    //TODO
+    // Binder事件 需要额外magisk模块: ReKernel
     void binderEventTriggerTask() {
         int skfd;
         int ret;
         user_msg_info u_info{};
         socklen_t len;
-        struct sockaddr_nl saddr{}, daddr{};
+        struct sockaddr_nl saddr {}, daddr{};
         auto umsg = "Hello! Re:Kernel!";
+
+        if (access("/proc/rekernel/22", F_OK)) {
+            freezeit.log("ReKernel未安装: /proc/rekernel/22");
+            return;
+        }
 
         struct nlmsghdr* nlh = (struct nlmsghdr*)malloc(NLMSG_SPACE(MAX_PLOAD));
 
-        while (true){
-            skfd = socket(AF_NETLINK, SOCK_RAW, NETLINK_TEST);
-            if (skfd == -1){
-                //perror("Create connection error\n");
-                freezeit.log("BinderEvent AF_NETLINK 创建失败");
-                fprintf(stderr, "BinderEvent AF_NETLINK 创建失败");
+        int failCnt = 0;
+        while (true) {
+            if (++failCnt > 100) {
+                auto tips = "ReKernel 工作异常次数超100次，将退出binder事件监听";
+                freezeit.log(tips);
+                fprintf(stderr, "%s", tips);
+                break;
+            }
+
+            skfd = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_TEST);
+            if (skfd == -1) {
+                freezeit.log("ReKernel AF_NETLINK 创建失败");
                 sleep(60);
                 continue;
             }
@@ -1178,12 +1216,10 @@ public:
             saddr.nl_family = AF_NETLINK;
             saddr.nl_pid = USER_PORT;
             saddr.nl_groups = 0;
-            if (bind(skfd, (struct sockaddr*)&saddr, sizeof(saddr)) != 0){
-                //perror("Failed bind to connection\n");
+            if (bind(skfd, (struct sockaddr*)&saddr, sizeof(saddr)) != 0) {
                 close(skfd);
 
-                freezeit.log("BinderEvent bind 失败");
-                fprintf(stderr, "BinderEvent bind 失败");
+                freezeit.log("ReKernel bind 失败");
                 sleep(60);
                 continue;
             }
@@ -1201,38 +1237,42 @@ public:
             nlh->nlmsg_pid = saddr.nl_pid;
 
             memcpy(NLMSG_DATA(nlh), umsg, strlen(umsg));
-            freezeit.logFmt("Send msg to kernel:%s", umsg);
+            //freezeit.logFmt("Send msg to kernel:%s", umsg);
 
             ret = sendto(skfd, nlh, nlh->nlmsg_len, 0, (struct sockaddr*)&daddr, sizeof(struct sockaddr_nl));
             if (!ret) {
-                //perror("Failed send msg to kernel!\n");
                 close(skfd);
 
-                freezeit.log("Failed send msg to kernel");
-                fprintf(stderr, "Failed send msg to kernel");
+                freezeit.log("ReKernel Failed send msg to kernel");
                 sleep(60);
                 continue;
             }
-
+            isReKernelConnected = true;
             while (true) {
                 memset(&u_info, 0, sizeof(u_info));
                 len = sizeof(struct sockaddr_nl);
                 ret = recvfrom(skfd, &u_info, sizeof(user_msg_info), 0, (struct sockaddr*)&daddr, &len);
                 if (!ret) {
-                    //perror("Failed recv msg from kernel!\n");
-                    //close(skfd);
-
-                    freezeit.log("Failed recv msg from kernel!");
-                    fprintf(stderr, "Failed recv msg from kernel!");
+                    freezeit.log("ReKernel Failed recv msg from kernel!");
                     break;
                 }
 
-                //printf("Message from kernel:%s\n", u_info.msg);
-                freezeit.logFmt("Message from kernel:[%s]", u_info.msg);
-                fprintf(stderr, "Message from kernel:[%s]", u_info.msg);
+                auto ptr = strstr(u_info.msg, "target=");
+                if (ptr != nullptr) {
+                    const int uid = atoi(ptr + 7);
+                    if (managedApp.contains(uid) && managedApp[uid].isSignalOrFreezer()
+                        && (!curForegroundApp.contains(uid))
+                        && (!pendingHandleList.contains(uid))) {
+                        unFreezerTemporary(uid);
+                        freezeit.logFmt("Binder解冻 %s", managedApp[uid].label.c_str());
+                    }
+                }
+
+                binderEventCnt++;
             }
 
             close(skfd);
+            sleep(60);
         }
 
         free(nlh);
@@ -1268,6 +1308,7 @@ public:
             if (++halfSecondCnt & 1) continue;
 
             systemTools.cycleCnt++;
+            systemTools.runningTime++;
 
             processPendingApp();//1秒一次
 

@@ -614,6 +614,7 @@ public:
                 .freezeMode = isSYS ? FREEZE_MODE::WHITELIST : FREEZE_MODE::FREEZER,
                 .isPermissive = true,
                 .delayCnt = 0,
+                .timelineUnfrozenIdx = -1,
                 .isSystemApp = isSYS,
                 .startTimestamp = 0,
                 .stopTimestamp = 0,

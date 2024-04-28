@@ -197,8 +197,9 @@ struct uidTimeStruct {
 struct appInfoStruct {
     int uid = -1;
     FREEZE_MODE freezeMode = FREEZE_MODE::FREEZER; // [10]:杀死 [20]:SIGSTOP [30]:freezer [40]:配置 [50]:内置
-    bool isPermissive = true;        // 宽容的 有前台服务也算前台
+    bool isPermissive = true;      // 宽容的 有前台服务也算前台
     int delayCnt = 0;              // Binder冻结失败而延迟次数
+    int timelineUnfrozenIdx = -1;  // 解冻时间线索引
     bool isSystemApp = true;       // 是否系统应用
     time_t startTimestamp = 0;     // 某次开始运行时刻
     time_t stopTimestamp = 0;      // 某次冻结运行时刻
@@ -235,7 +236,7 @@ struct cfgStruct {
     bool isPermissive = true;
 };
 
-template<size_t CAPACITY=32>
+template<const size_t CAPACITY=32>
 class stackString {
 public:
     size_t length{ 0 };

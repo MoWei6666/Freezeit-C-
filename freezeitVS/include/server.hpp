@@ -146,8 +146,8 @@ public:
                     continue;
                 }
                 else if (payloadLen >= RECV_BUF_SIZE) {
-                    freezeit.logFmt("数据格式异常 payloadLen[%u] dataHeaderHEX[%s]", payloadLen,
-                        Utils::bin2Hex(dataHeader, 6).c_str());
+                    //freezeit.logFmt("数据格式异常 payloadLen[%u] dataHeaderHEX[%s]", payloadLen,
+                    //    Utils::bin2Hex(dataHeader, 6).c_str()); // 直接忽略
                     close(clnt_sock);
                     continue;
                 }

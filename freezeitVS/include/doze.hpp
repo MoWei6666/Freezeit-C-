@@ -230,7 +230,7 @@ public:
 
                 tmp.clear();
                 for (auto& [uid, delta] : uidTimeSort) {
-                    tmp.append("[", 1);
+                    tmp.append('[');
                     const int minutesMilliSec = 60 * 1000;
                     if (delta >= minutesMilliSec) {
                         tmp.appendFmt("%d分", delta / minutesMilliSec);
