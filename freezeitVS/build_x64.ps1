@@ -1,25 +1,24 @@
 $ErrorActionPreference = 'Stop'
 
-function log($logContent){
-    Write-Host ("[{0}] {1}" -f (Get-Date), $logContent)
+function log
+{
+    [CmdletBinding()]
+    Param
+    (
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]$LogMessage
+    )
+    Write-Output ("[{0}] {1}" -f (Get-Date), $LogMessage)
 }
 
-function abort($logContent){
-    Write-Host ("[{0}] {1}" -f (Get-Date), $logContent) -ForegroundColor:Red 
-    exit -1
-}
-
-$ndkPath = "D:/AndroidSDK/ndk/26.1.10909125"
-$clang = "${ndkPath}/toolchains/llvm/prebuilt/windows-x86_64/bin/clang++.exe"
-$sysroot = "--sysroot=${ndkPath}/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
+$windowsToolchainsDir = "D:/AndroidSDK/ndk/25.2.9519653/toolchains/llvm/prebuilt/windows-x86_64/bin"
+$clang = "${windowsToolchainsDir}/clang++.exe"
+#$target = "--target=aarch64-none-linux-android29"
+$target = "--target=x86_64-none-linux-android29"
+$sysroot = "--sysroot=D:/AndroidSDK/ndk/25.2.9519653/toolchains/llvm/prebuilt/windows-x86_64/sysroot"
 $cppFlags = "-std=c++20 -static -s -Ofast -Wall -Wextra -Wshadow -fno-exceptions -fno-rtti -DNDEBUG -fPIE"
 
-$target = "--target=x86_64-none-linux-android31"
-log "Compiler X64 ..."
-& $clang $target $sysroot $cppFlags.Split(' ') -Iinclude src/main.cpp -o magisk/freezeitX64
-if (-not$?)
-{
-    abort "Compiler fail"
-}
+log "Compiler..."
+& $clang $target $sysroot $cppFlags.Split(' ') -I. main.cpp -o ./X64/freezeit
 
 log "Done"
